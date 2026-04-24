@@ -1,0 +1,48 @@
+# -----------------------------------------------
+# Composer dependencies
+# -----------------------------------------------
+/vendor/
+composer.lock
+
+# -----------------------------------------------
+# Sensitive config (NEVER commit)
+# -----------------------------------------------
+config/database.php
+
+# -----------------------------------------------
+# Debug & storage logs
+# -----------------------------------------------
+storage/
+
+# -----------------------------------------------
+# Excel temp files (terbuka di Excel)
+# -----------------------------------------------
+import/~$*.xlsx
+
+# -----------------------------------------------
+# File import referensi / sample lokal
+# -----------------------------------------------
+import/table_brand.txt
+import/table_setting.txt
+import/tb_setting1_max30.xlsx
+import/tb_setting2_max30.xlsx
+
+# -----------------------------------------------
+# File hasil export undian
+# -----------------------------------------------
+Hasil_Undian_*.xlsx
+
+# -----------------------------------------------
+# Script sementara / sekali pakai
+# -----------------------------------------------
+convert_brand.php
+public/migrate.php
+core/DrawService copy.php
+core/test.php
+
+# -----------------------------------------------
+# OS / Editor junk
+# -----------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
