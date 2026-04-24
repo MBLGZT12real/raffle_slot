@@ -1,132 +1,95 @@
 <?php
-    require_once __DIR__ . '/../vendor/autoload.php';
-    require_once __DIR__ . '/../helpers/db.php';
+if (session_status() === PHP_SESSION_NONE) session_start();
+require_once '../partials/auth_check.php';
+require_once '../vendor/autoload.php';
+require_once '../helpers/db.php';
+require_once '../core/LogModel.php';
 
-    use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
-    /* =========================
-    VALIDASI FILE
-    ========================= */
-    if (!isset($_FILES['file'])) {
-        die('File tidak ditemukan');
-    }
+$step = $_POST['step'] ?? 'preview';
 
-    $file = $_FILES['file'];
+/* ================================================================
+   CANCEL
+   ================================================================ */
+if ($step === 'cancel') {
+    unset($_SESSION['import_brand_preview'], $_SESSION['import_brand_file'], $_SESSION['import_brand_tmp']);
+    header('Location: import_brand.php');
+    exit;
+}
 
-    if ($file['error'] !== UPLOAD_ERR_OK) {
-        die('Upload gagal');
-    }
+/* ================================================================
+   CONFIRM
+   ================================================================ */
+if ($step === 'confirm') {
+    $data = $_SESSION['import_brand_preview'] ?? null;
+    if (!$data) { header('Location: import_brand.php'); exit; }
 
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    if ($ext !== 'xlsx') {
-        die('Format file harus .xlsx');
-    }
-
-    /* =========================
-    LOAD EXCEL
-    ========================= */
-    $spreadsheet = IOFactory::load($file['tmp_name']);
-    $sheet       = $spreadsheet->getActiveSheet();
-    $rows        = $sheet->toArray(null, true, true, true);
-
-    if (count($rows) < 2) {
-        die('File Excel kosong');
-    }
-
-    /* =========================
-    VALIDASI HEADER
-    Kolom wajib: name_brand, group_brand
-    Kolom opsional: not_allow_brand (kosong = boleh ketemu semua)
-    ========================= */
-    $headerRow = array_map(
-        fn($v) => strtolower(trim((string)$v)),
-        $rows[1]
-    );
-
-    $required = ['name_brand', 'group_brand'];
-    $map      = [];
-    foreach ($required as $col) {
-        $index = array_search($col, $headerRow, true);
-        if ($index === false) {
-            die("Kolom '$col' wajib ada di file Excel");
-        }
-        $map[$col] = $index;
-    }
-
-    // not_allow_brand opsional
-    $notAllowIdx = array_search('not_allow_brand', $headerRow, true);
-    $map['not_allow_brand'] = $notAllowIdx !== false ? $notAllowIdx : null;
-
-    /* =========================
-    TRANSACTION START
-    ========================= */
     global $conn;
     $conn->begin_transaction();
-
     try {
-        /* TRUNCATE TABLE */
         db_query("TRUNCATE TABLE table_brand");
-
-        $stmt = $conn->prepare("
-            INSERT INTO table_brand (name_brand, group_brand, not_allow_brand)
-            VALUES (?, ?, ?)
-        ");
-
-        /* =========================
-        LOOP DATA
-        ========================= */
-        for ($i = 2; $i <= count($rows); $i++) {
-            $row = $rows[$i];
-
-            if (empty($row[$map['name_brand']])) {
-                continue;
-            }
-
-            $nameBrand  = trim((string)$row[$map['name_brand']]);
-            $groupBrand = trim((string)$row[$map['group_brand']]);
-
-            // not_allow_brand boleh kosong
-            $notAllow = '';
-            if ($map['not_allow_brand'] !== null && !empty($row[$map['not_allow_brand']])) {
-                $notAllow = trim((string)$row[$map['not_allow_brand']]);
-            }
-
-            /* =========================
-            VALIDASI name_brand
-            ========================= */
-            if (!preg_match('/^[A-Za-z0-9\s\-\.,]{1,30}$/', $nameBrand)) {
-                throw new Exception("name_brand tidak valid di baris $i: \"$nameBrand\"");
-            }
-
-            /* =========================
-            VALIDASI group_brand
-            ========================= */
-            if (!preg_match('/^[A-Za-z]{1}$/', $groupBrand)) {
-                throw new Exception("group_brand harus 1 huruf alfabet di baris $i");
-            }
-
-            /* =========================
-            VALIDASI not_allow_brand (jika diisi)
-            ========================= */
-            if ($notAllow !== '' && !preg_match('/^[A-Za-z0-9\s\-\.,]+$/', $notAllow)) {
-                throw new Exception("not_allow_brand tidak valid di baris $i");
-            }
-
-            /* INSERT */
-            $stmt->bind_param("sss", $nameBrand, $groupBrand, $notAllow);
-
-            if (!$stmt->execute()) {
-                throw new Exception("Gagal insert baris $i");
-            }
+        $stmt = $conn->prepare("INSERT INTO table_brand (name_brand, group_brand, not_allow_brand) VALUES (?,?,?)");
+        foreach ($data as $r) {
+            $stmt->bind_param('sss', $r['name_brand'], $r['group_brand'], $r['not_allow_brand']);
+            $stmt->execute();
         }
-
         $stmt->close();
         $conn->commit();
 
-        header('Location: import_brand.php?success=1');
+        writeLog('import_brand', null, ['rows' => count($data)]);
+
+        unset($_SESSION['import_brand_preview'], $_SESSION['import_brand_file'], $_SESSION['import_brand_tmp']);
+        header('Location: import_brand.php?success=1&rows=' . count($data));
         exit;
     } catch (Exception $e) {
         $conn->rollback();
         die('Import gagal: ' . $e->getMessage());
     }
+}
+
+/* ================================================================
+   PREVIEW
+   ================================================================ */
+if (!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) die('Upload gagal');
+$ext = strtolower(pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION));
+if ($ext !== 'xlsx') die('Format harus .xlsx');
+
+$tmpDest = __DIR__ . '/../storage/tmp_brand_import.xlsx';
+if (!is_dir(dirname($tmpDest))) mkdir(dirname($tmpDest), 0755, true);
+move_uploaded_file($_FILES['file']['tmp_name'], $tmpDest);
+
+$spreadsheet = IOFactory::load($tmpDest);
+$rows        = $spreadsheet->getActiveSheet()->toArray(null, true, true, true);
+
+$headerRow = array_map(fn($v) => strtolower(trim((string)$v)), $rows[1]);
+$required  = ['name_brand', 'group_brand'];
+$map       = [];
+foreach ($required as $col) {
+    $idx = array_search($col, $headerRow, true);
+    if ($idx === false) die("Kolom '$col' tidak ditemukan");
+    $map[$col] = $idx;
+}
+$notAllowIdx = array_search('not_allow_brand', $headerRow, true);
+
+$data = [];
+for ($i = 2; $i <= count($rows); $i++) {
+    $row  = $rows[$i];
+    $name = trim((string)($row[$map['name_brand']] ?? ''));
+    if (!$name) continue;
+    if (!preg_match('/^[A-Za-z0-9\s\-\.,]{1,30}$/', $name)) die("name_brand tidak valid di baris $i: \"$name\"");
+    $grp = trim((string)($row[$map['group_brand']] ?? ''));
+    if (!preg_match('/^[A-Za-z]{1}$/', $grp)) die("group_brand tidak valid di baris $i");
+    $na = '';
+    if ($notAllowIdx !== false && !empty($row[$notAllowIdx])) {
+        $na = trim((string)$row[$notAllowIdx]);
+        if (!preg_match('/^[A-Za-z0-9\s\-\.,]+$/', $na)) die("not_allow_brand tidak valid di baris $i");
+    }
+    $data[] = ['name_brand' => $name, 'group_brand' => $grp, 'not_allow_brand' => $na];
+}
+
+$_SESSION['import_brand_preview'] = $data;
+$_SESSION['import_brand_file']    = $_FILES['file']['name'];
+header('Location: import_brand.php');
+exit;
 ?>

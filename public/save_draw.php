@@ -1,81 +1,55 @@
-<?php 
-    ini_set('display_errors', 1);
-    ini_set('display_startup_errors', 1);
-    error_reporting(E_ALL);
+<?php
+if (session_status() === PHP_SESSION_NONE) session_start();
+header('Content-Type: application/json');
+require_once '../partials/auth_check_api.php';
+require_once '../core/ResultModel.php';
+require_once '../core/SettingModel.php';
+require_once '../core/LogModel.php';
 
-    header('Content-Type: application/json');
+try {
+    $input = json_decode(file_get_contents('php://input'), true);
+    $date  = $input['date_slot'] ?? null;
+    $mode  = $input['mode']      ?? 'strict';
+    $slots = $input['result']    ?? null;
 
-    require_once '../core/ResultModel.php';
-    require_once '../core/SettingModel.php';
+    if (!$date || !is_array($slots)) throw new Exception("Data undian tidak valid");
 
-    try {
-        // 1️⃣ Ambil input JSON
-        $input = json_decode(file_get_contents('php://input'), true);
+    $setting = getSettingByDate($date);
+    if (!$setting) throw new Exception("Setting tanggal tidak ditemukan");
 
-        $date  = $input['date_slot'] ?? null;
-        $slots = $input['result'] ?? null;
+    $expectedTotal = (int)$setting['total_slot'];
+    if (count($slots) !== $expectedTotal) throw new Exception("Jumlah slot tidak sesuai setting");
 
-        if (!$date || !is_array($slots)) {
-            throw new Exception("Data undian tidak valid");
-        }
+    deleteResultByDate($date);
 
-        // 2️⃣ Validasi setting
-        $setting = getSettingByDate($date);
-        if (!$setting) {
-            throw new Exception("Setting tanggal tidak ditemukan");
-        }
+    $collisionCount = 0;
+    foreach ($slots as $i => $slot) {
+        $isRelaxed = 0;
+        $collision = null;
 
-        $expectedTotal = (int)$setting['total_slot'];
-        if (count($slots) !== $expectedTotal) {
-            throw new Exception("Jumlah slot tidak sesuai setting");
-        }
-
-        // 3️⃣ Hapus data lama (1 tanggal = 1 hasil)
-        deleteResultByDate($date);
-
-        // 4️⃣ Simpan PER SLOT
-        foreach ($slots as $i => $slot) {
-            // default
-            $isRelaxed = 0;
-            $collision = null;
-
-            // ambil meta jika ada
-            if (isset($slot['__meta'])) {
-                if (!empty($slot['__meta']['relaxed'])) {
-                    $isRelaxed = 1;
-                }
-
-                if (!empty($slot['__meta']['collision'])) {
-                    $collision = $slot['__meta']['collision'];
-                }
-
-                // ⛔ jangan simpan meta ke slot_data
-                unset($slot['__meta']);
+        if (isset($slot['__meta'])) {
+            if (!empty($slot['__meta']['relaxed']))   $isRelaxed = 1;
+            if (!empty($slot['__meta']['collision'])) {
+                $collision = $slot['__meta']['collision'];
+                $collisionCount += count($collision);
             }
-
-            // simpan ke DB
-            saveResult(
-                $date,
-                $i + 1,     // slot_number
-                $slot,      // slot_data (JSON)
-                $isRelaxed, // is_relaxed
-                $collision  // collision_info (JSON / null)
-            );
+            unset($slot['__meta']);
         }
 
-        // 5️⃣ Response
-        echo json_encode([
-            'status'     => 'ok',
-            'date_slot'  => $date,
-            'total_slot' => $expectedTotal
-        ], JSON_UNESCAPED_UNICODE);
-        
-        //debugLog("save_debug.log", print_r($slots, true));
-    } catch (Exception $e) {
-        http_response_code(500);
-        echo json_encode([
-            'status'  => 'error',
-            'message' => $e->getMessage()
-        ]);
+        saveResult($date, $i + 1, $slot, $isRelaxed, $collision);
     }
+
+    writeLog('draw_success', $date, [
+        'total_slot' => $expectedTotal,
+        'collision'  => $collisionCount,
+        'mode'       => $mode,
+    ]);
+
+    echo json_encode(['status' => 'ok', 'date_slot' => $date, 'total_slot' => $expectedTotal], JSON_UNESCAPED_UNICODE);
+
+} catch (Exception $e) {
+    writeLog('draw_fail', $date ?? null, ['error' => $e->getMessage()]);
+    http_response_code(500);
+    echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+}
 ?>

@@ -2,84 +2,49 @@
     require_once __DIR__ . '/SettingModel.php';
     require_once __DIR__ . '/BrandModel.php';
 
-    /**
-     * Generate slot undian berdasarkan tanggal.
-     *
-     * return:
-     * [
-     *   0 => ['A' => 'Fuso', 'B' => 'Hyundai', 'C' => 'GWM'],
-     *   1 => ['A' => 'Isuzu', 'B' => 'KIA',    'C' => 'Changan', '__meta' => [...]], // relax mode
-     * ]
-     */
-    function generateSlotsByDate($date, $isRelax = false) {
-        // 1. Ambil setting
+    function generateSlotsByDate(string $date, bool $isRelax = false): array {
         $setting = getSettingByDate($date);
-        if (!$setting) {
-            throw new Exception("Setting tanggal $date tidak ditemukan");
-        }
+        if (!$setting) throw new Exception("Setting tanggal $date tidak ditemukan");
 
         $totalSlot = (int)$setting['total_slot'];
         $min       = (int)$setting['min_slot'];
         $max       = (int)$setting['max_slot'];
 
-        // 2. Ambil brand per group
         $groups = getAllBrandsByGroup();
-        if (empty($groups)) {
-            throw new Exception("Data brand kosong");
-        }
+        if (empty($groups)) throw new Exception("Data brand kosong");
 
-        // 3. Validasi slot min / max
         validateSlotCount($groups, $min, $max, $totalSlot);
 
-        // 4. Build pool per group
         $pools = [];
         foreach ($groups as $group => $brands) {
             $quota        = buildQuota($brands, $min, $max, $totalSlot);
             $pools[$group] = expandPool($quota);
         }
 
-        // 5. Not-allow rules (blacklist)
         $rules = getNotAllowRules();
-
-        // 6. Pairing multi-group
         $slots = buildMultiGroupSlots($pools, $rules, $totalSlot, $isRelax);
 
-        // 7. Reorder agar tidak ada brand yang sama berurutan
-        $groupKeys = array_values(array_filter(
-            array_keys($slots[0]),
-            fn($k) => $k !== '__meta'
-        ));
+        $groupKeys = array_values(array_filter(array_keys($slots[0]), fn($k) => $k !== '__meta'));
         return reorderNonConsecutive($slots, $groupKeys);
     }
 
     /* ===================================================================
      * VALIDASI
      * =================================================================== */
-
-    function validateSlotCount($groups, $min, $max, $totalSlot) {
+    function validateSlotCount(array $groups, int $min, int $max, int $totalSlot): void {
         foreach ($groups as $g => $brands) {
             $count = count($brands);
-
-            if ($totalSlot < $count * $min) {
-                throw new Exception("Group $g: total slot kurang dari minimum ({$count} brand × min={$min})");
-            }
-
-            if ($totalSlot > $count * $max) {
-                throw new Exception("Group $g: total slot melebihi maksimum ({$count} brand × max={$max})");
-            }
+            if ($totalSlot < $count * $min) throw new Exception("Group $g: total slot < minimum ({$count}×{$min})");
+            if ($totalSlot > $count * $max) throw new Exception("Group $g: total slot > maksimum ({$count}×{$max})");
         }
     }
 
     /* ===================================================================
      * QUOTA & POOL
      * =================================================================== */
-
-    function buildQuota(array $brands, $min, $max, $totalSlot) {
-        $quota = [];
-        foreach ($brands as $b) {
-            $quota[$b['name_brand']] = $min;
-        }
-
+    function buildQuota(array $brands, int $min, int $max, int $totalSlot): array {
+        $quota   = [];
+        foreach ($brands as $b) $quota[$b['name_brand']] = $min;
         $current = count($brands) * $min;
 
         while ($current < $totalSlot) {
@@ -96,44 +61,72 @@
         return $quota;
     }
 
-    function expandPool(array $quota) {
+    function expandPool(array $quota): array {
         $pool = [];
         foreach ($quota as $brand => $count) {
-            for ($i = 0; $i < $count; $i++) {
-                $pool[] = $brand;
-            }
+            for ($i = 0; $i < $count; $i++) $pool[] = $brand;
         }
         shuffle($pool);
         return $pool;
     }
 
     /* ===================================================================
-     * ATURAN PERTEMUAN — BLACKLIST (not_allow)
-     *
-     * canMeet() mengembalikan TRUE jika dua brand BOLEH berada di
-     * slot yang sama.
-     *
-     * Logika MUTUAL: jika salah satu pihak mencantumkan pihak lain
-     * di not_allow_brand, keduanya tidak boleh bertemu.
-     * Kosong/null → boleh ketemu siapa saja.
+     * ATURAN PERTEMUAN — BLACKLIST MUTUAL
+     * canMeet() → true = boleh satu slot
+     * Jika salah satu pihak mencantumkan lawan di not_allow → false
      * =================================================================== */
-
-    function canMeet($a, $b, $rules) {
-        // A melarang B
+    function canMeet(string $a, string $b, array $rules): bool {
         if (!empty($rules[$a]) && in_array($b, $rules[$a], true)) return false;
-        // B melarang A (mutual)
         if (!empty($rules[$b]) && in_array($a, $rules[$b], true)) return false;
         return true;
     }
 
     /* ===================================================================
-     * PAIRING MULTI-GROUP (STRICT / RELAX)
+     * BACKTRACKING — pasang satu slot dengan semua group
+     *
+     * Berbeda dari greedy: jika pilihan brand di group X menyebabkan
+     * kegagalan di group berikutnya, algoritma mundur dan mencoba
+     * kandidat lain di group X (tidak langsung restart seluruh undian).
+     *
+     * $pools dilewatkan by-value sehingga backtrack otomatis terjadi
+     * tanpa perlu restore manual.
      * =================================================================== */
+    function buildSlotBacktrack(array $groups, int $gIdx, array $currentSlot, array $pools, array $rules): ?array {
+        if ($gIdx >= count($groups)) return $currentSlot;
 
-    function buildMultiGroupSlots(array $pools, array $rules, $totalSlot, $isRelax, $maxTry = 2000) {
-        $RELAX_AFTER_TRY = 300;
+        $g = $groups[$gIdx];
 
-        // Heuristic: group dengan pool lebih kecil diproses dulu
+        foreach ($pools[$g] as $k => $candidate) {
+            $ok = true;
+            foreach ($currentSlot as $existingBrand) {
+                if (!canMeet($candidate, $existingBrand, $rules)) { $ok = false; break; }
+            }
+
+            if ($ok) {
+                $newSlot       = $currentSlot;
+                $newSlot[$g]   = $candidate;
+                $newPools      = $pools;
+                array_splice($newPools[$g], $k, 1);
+
+                $result = buildSlotBacktrack($groups, $gIdx + 1, $newSlot, $newPools, $rules);
+                if ($result !== null) return $result;
+                // kandidat ini jalan buntu → coba kandidat berikutnya (backtrack otomatis)
+            }
+        }
+
+        return null; // tidak ada kombinasi valid untuk group ini
+    }
+
+    /* ===================================================================
+     * PAIRING MULTI-GROUP
+     * Menggunakan backtracking per slot.
+     * Retry tetap ada untuk menangani kegagalan antar-slot
+     * (pool yang terlalu homogen setelah beberapa slot terisi).
+     * Jumlah retry jauh lebih sedikit dibanding greedy murni.
+     * =================================================================== */
+    function buildMultiGroupSlots(array $pools, array $rules, int $totalSlot, bool $isRelax, int $maxTry = 500): array {
+        $RELAX_AFTER = 50;
+
         $groups = array_keys($pools);
         usort($groups, fn($a, $b) => count($pools[$a]) <=> count($pools[$b]));
 
@@ -148,79 +141,60 @@
             $failed = false;
 
             for ($i = 0; $i < $totalSlot; $i++) {
-                $slot = [];
-                if ($isRelax) {
-                    $slot['__meta'] = ['relaxed' => true, 'collision' => []];
-                }
+                $slot = buildSlotBacktrack($groups, 0, [], $workingPools, $rules);
 
-                foreach ($groups as $g) {
-                    $found = false;
-                    foreach ($workingPools[$g] as $k => $candidate) {
-                        $ok = true;
-                        foreach ($slot as $key => $existing) {
-                            if ($key === '__meta') continue;
-
-                            if (!canMeet($candidate, $existing, $rules)) {
-                                if ($isRelax && $try >= $RELAX_AFTER_TRY) {
-                                    // Catat collision tapi tetap lanjut
-                                    $slot['__meta']['collision'][] = [
-                                        'group'    => $g,
-                                        'brand'    => $candidate,
-                                        'conflict' => $existing,
-                                        'slot'     => $i + 1
-                                    ];
-                                    continue;
+                if ($slot === null) {
+                    // Backtracking gagal untuk slot ini
+                    if ($isRelax && $try >= $RELAX_AFTER) {
+                        // Ambil brand pertama yang tersedia, log collision
+                        $slot      = [];
+                        $collision = [];
+                        foreach ($groups as $g) {
+                            $chosen = reset($workingPools[$g]);
+                            foreach ($slot as $existing) {
+                                if (!canMeet($chosen, $existing, $rules)) {
+                                    $collision[] = ['group' => $g, 'brand' => $chosen, 'conflict' => $existing, 'slot' => $i + 1];
                                 }
-                                $ok = false;
-                                break;
                             }
+                            $slot[$g] = $chosen;
                         }
-
-                        if ($ok) {
-                            $slot[$g] = $candidate;
-                            unset($workingPools[$g][$k]);
-                            $workingPools[$g] = array_values($workingPools[$g]);
-                            $found = true;
-                            break;
-                        }
-                    }
-
-                    if (!$found) {
+                        $slot['__meta'] = ['relaxed' => true, 'collision' => $collision];
+                    } else {
                         $failed = true;
                         break;
                     }
+                } elseif ($isRelax) {
+                    $slot['__meta'] = ['relaxed' => true, 'collision' => []];
                 }
 
-                if ($failed) break;
-
-                if (!$isRelax && isset($slot['__meta'])) {
-                    unset($slot['__meta']);
+                // Keluarkan brand yang terpakai dari workingPools
+                foreach ($groups as $g) {
+                    if (!isset($slot[$g])) continue;
+                    $idx = array_search($slot[$g], $workingPools[$g]);
+                    if ($idx !== false) array_splice($workingPools[$g], $idx, 1);
                 }
 
+                if (!$isRelax) unset($slot['__meta']);
                 $slots[] = $slot;
             }
 
             if (!$failed) return $slots;
         }
 
-        throw new Exception("Undian gagal setelah $maxTry percobaan. Aturan not_allow terlalu ketat atau total_slot tidak sesuai.");
+        throw new Exception("Undian gagal setelah $maxTry percobaan. Periksa aturan not_allow atau total_slot.");
     }
 
     /* ===================================================================
      * REORDER NON-KONSEKUTIF
-     *
-     * Mengatur ulang urutan slot agar tidak ada brand yang sama muncul
-     * di dua slot berurutan dalam group yang sama.
-     * Menggunakan greedy + random restart (max $maxAttempts kali).
+     * Susun ulang urutan slot agar tidak ada brand yang sama di dua
+     * slot berurutan pada group yang sama (greedy + random restart).
      * =================================================================== */
-
     function reorderNonConsecutive(array $slots, array $groups, int $maxAttempts = 300): array {
         $n = count($slots);
         if ($n <= 1) return $slots;
 
         $bestSlots     = $slots;
         $bestConflicts = countConsecutiveConflicts($slots, $groups);
-
         if ($bestConflicts === 0) return $slots;
 
         for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
@@ -241,10 +215,7 @@
                     }
                 }
 
-                // Tidak ada kandidat bebas konflik → ambil yang pertama (minimum damage)
-                if (!$placed) {
-                    $arranged[] = array_shift($remaining);
-                }
+                if (!$placed) $arranged[] = array_shift($remaining);
             }
 
             $conflicts = countConsecutiveConflicts($arranged, $groups);
@@ -252,35 +223,24 @@
                 $bestConflicts = $conflicts;
                 $bestSlots     = $arranged;
             }
-
             if ($bestConflicts === 0) break;
         }
 
         return $bestSlots;
     }
 
-    /**
-     * Cek apakah dua slot berurutan memiliki brand yang sama di group manapun.
-     */
     function hasConsecutiveConflict(array $prev, array $next, array $groups): bool {
         foreach ($groups as $g) {
-            if (isset($prev[$g]) && isset($next[$g]) && $prev[$g] === $next[$g]) {
-                return true;
-            }
+            if (isset($prev[$g], $next[$g]) && $prev[$g] === $next[$g]) return true;
         }
         return false;
     }
 
-    /**
-     * Hitung total pasangan berurutan yang memiliki brand sama.
-     */
     function countConsecutiveConflicts(array $slots, array $groups): int {
         $count = 0;
         $n     = count($slots);
         for ($i = 1; $i < $n; $i++) {
-            if (hasConsecutiveConflict($slots[$i - 1], $slots[$i], $groups)) {
-                $count++;
-            }
+            if (hasConsecutiveConflict($slots[$i - 1], $slots[$i], $groups)) $count++;
         }
         return $count;
     }

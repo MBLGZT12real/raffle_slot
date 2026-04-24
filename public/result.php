@@ -1,4 +1,6 @@
-<?php 
+<?php
+    if (session_status() === PHP_SESSION_NONE) session_start();
+    require_once '../partials/auth_check.php';
     require_once '../core/ResultModel.php';
     require_once '../core/BrandModel.php';
 

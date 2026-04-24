@@ -57,3 +57,20 @@ CREATE TABLE IF NOT EXISTS `table_result` (
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_general_ci;
+
+-- ------------------------------------------------------------
+-- table_log
+-- Log aktivitas sistem (undian, import, hapus)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `table_log` (
+    `id`         INT(11)      NOT NULL AUTO_INCREMENT,
+    `action`     VARCHAR(50)  NOT NULL COMMENT 'draw_success, draw_fail, import_brand, import_setting, delete_result',
+    `date_slot`  DATE         DEFAULT NULL,
+    `detail`     TEXT         DEFAULT NULL COMMENT 'JSON: total_slot, collision_count, mode, dsb',
+    `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_action`     (`action`),
+    KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_general_ci;

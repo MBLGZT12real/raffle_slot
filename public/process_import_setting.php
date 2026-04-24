@@ -1,118 +1,92 @@
-<?php 
-    require_once __DIR__ . '/../vendor/autoload.php';
-    require_once __DIR__ . '/../helpers/db.php';
+<?php
+if (session_status() === PHP_SESSION_NONE) session_start();
+require_once '../partials/auth_check.php';
+require_once '../vendor/autoload.php';
+require_once '../helpers/db.php';
+require_once '../core/LogModel.php';
 
-    use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
-    /* =========================
-    VALIDASI FILE
-    ========================= */
-    if (!isset($_FILES['file'])) {
-        die('File tidak ditemukan');
-    }
+$step = $_POST['step'] ?? 'preview';
 
-    $file = $_FILES['file'];
+/* ================================================================
+   CANCEL
+   ================================================================ */
+if ($step === 'cancel') {
+    unset($_SESSION['import_setting_preview'], $_SESSION['import_setting_file'], $_SESSION['import_setting_tmp']);
+    header('Location: import_setting.php');
+    exit;
+}
 
-    if ($file['error'] !== UPLOAD_ERR_OK) {
-        die('Upload gagal');
-    }
+/* ================================================================
+   CONFIRM — proses dari data session
+   ================================================================ */
+if ($step === 'confirm') {
+    $data = $_SESSION['import_setting_preview'] ?? null;
+    if (!$data) { header('Location: import_setting.php'); exit; }
 
-    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-    if ($ext !== 'xlsx') {
-        die('Format file harus .xlsx');
-    }
-
-    /* =========================
-    LOAD EXCEL
-    ========================= */
-    $spreadsheet = IOFactory::load($file['tmp_name']);
-    $sheet       = $spreadsheet->getActiveSheet();
-    $rows        = $sheet->toArray(null, true, true, true);
-
-    if (count($rows) < 2) {
-        die('File Excel kosong');
-    }
-
-    /* =========================
-    VALIDASI HEADER
-    ========================= */
-    $headerRow = array_map(
-        fn($v) => strtolower(trim($v)),
-        $rows[1]
-    );
-
-    $required = ['date_slot', 'min_slot', 'max_slot', 'total_slot'];
-    $map      = [];
-
-    foreach ($required as $col) {
-        $index = array_search($col, $headerRow, true);
-        if ($index === false) {
-            die("Kolom '$col' wajib ada di file Excel");
-        }
-        $map[$col] = $index;
-    }
-
-    /* =========================
-    TRANSACTION START
-    ========================= */
     global $conn;
     $conn->begin_transaction();
-
     try {
-        /* TRUNCATE TABLE */
         db_query("TRUNCATE TABLE table_setting");
-
-        $stmt = $conn->prepare("
-            INSERT INTO table_setting (date_slot, min_slot, max_slot, total_slot)
-            VALUES (?, ?, ?, ?)
-        ");
-
-        /* =========================
-        LOOP DATA
-        ========================= */
-        for ($i = 2; $i <= count($rows); $i++) {
-            $row = $rows[$i];
-
-            if (empty($row[$map['date_slot']])) {
-                continue;
-            }
-
-            $date      = trim($row[$map['date_slot']]);
-            $minSlot   = (int)$row[$map['min_slot']];
-            $maxSlot   = (int)$row[$map['max_slot']];
-            $totalSlot = (int)$row[$map['total_slot']];
-
-            /* VALIDASI DATE */
-            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
-                throw new Exception("Format date_slot salah di baris $i");
-            }
-
-            /* VALIDASI MIN ≤ MAX */
-            if ($minSlot > $maxSlot) {
-                throw new Exception("min_slot > max_slot di baris $i");
-            }
-
-            /* INSERT */
-            $stmt->bind_param(
-                "siii",
-                $date,
-                $minSlot,
-                $maxSlot,
-                $totalSlot
-            );
-
-            if (!$stmt->execute()) {
-                throw new Exception("Gagal insert baris $i");
-            }
+        $stmt = $conn->prepare("INSERT INTO table_setting (date_slot, min_slot, max_slot, total_slot) VALUES (?,?,?,?)");
+        foreach ($data as $r) {
+            $stmt->bind_param('siii', $r['date_slot'], $r['min_slot'], $r['max_slot'], $r['total_slot']);
+            $stmt->execute();
         }
-
         $stmt->close();
         $conn->commit();
 
-        header('Location: import_setting.php?success=1');
+        writeLog('import_setting', null, ['rows' => count($data)]);
+
+        unset($_SESSION['import_setting_preview'], $_SESSION['import_setting_file'], $_SESSION['import_setting_tmp']);
+        header('Location: import_setting.php?success=1&rows=' . count($data));
         exit;
     } catch (Exception $e) {
         $conn->rollback();
         die('Import gagal: ' . $e->getMessage());
     }
+}
+
+/* ================================================================
+   PREVIEW — parse Excel dan simpan ke session
+   ================================================================ */
+if (!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) die('Upload gagal');
+$ext = strtolower(pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION));
+if ($ext !== 'xlsx') die('Format harus .xlsx');
+
+$tmpDest = __DIR__ . '/../storage/tmp_setting_import.xlsx';
+if (!is_dir(dirname($tmpDest))) mkdir(dirname($tmpDest), 0755, true);
+move_uploaded_file($_FILES['file']['tmp_name'], $tmpDest);
+
+$spreadsheet = IOFactory::load($tmpDest);
+$rows        = $spreadsheet->getActiveSheet()->toArray(null, true, true, true);
+
+$headerRow = array_map(fn($v) => strtolower(trim((string)$v)), $rows[1]);
+$required  = ['date_slot', 'min_slot', 'max_slot', 'total_slot'];
+$map       = [];
+foreach ($required as $col) {
+    $idx = array_search($col, $headerRow, true);
+    if ($idx === false) die("Kolom '$col' tidak ditemukan");
+    $map[$col] = $idx;
+}
+
+$data = [];
+for ($i = 2; $i <= count($rows); $i++) {
+    $row  = $rows[$i];
+    $date = trim((string)($row[$map['date_slot']] ?? ''));
+    if (!$date) continue;
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) die("Format date_slot salah di baris $i");
+    $data[] = [
+        'date_slot'  => $date,
+        'min_slot'   => (int)$row[$map['min_slot']],
+        'max_slot'   => (int)$row[$map['max_slot']],
+        'total_slot' => (int)$row[$map['total_slot']],
+    ];
+}
+
+$_SESSION['import_setting_preview'] = $data;
+$_SESSION['import_setting_file']    = $_FILES['file']['name'];
+header('Location: import_setting.php');
+exit;
 ?>

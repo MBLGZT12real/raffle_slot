@@ -1,4 +1,6 @@
-<?php 
+<?php
+    if (session_status() === PHP_SESSION_NONE) session_start();
+    require_once __DIR__ . '/../partials/auth_check.php';
     require_once __DIR__ . '/../vendor/autoload.php';
     require_once __DIR__ . '/../core/ResultModel.php';
     require_once __DIR__ . '/../core/BrandModel.php';
