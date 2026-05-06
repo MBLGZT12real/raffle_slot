@@ -163,7 +163,7 @@ foreach ($allSettings as $s) {
     </div>
 
     <!-- LOG AKTIVITAS -->
-    <div class="card">
+    <div class="card mb-4">
         <div class="card-header fw-bold"><i class="bi bi-journal-text me-1"></i> Log Aktivitas Terbaru</div>
         <div class="table-responsive">
             <table class="table table-sm table-hover mb-0">

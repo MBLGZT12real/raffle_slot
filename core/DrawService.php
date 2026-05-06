@@ -25,7 +25,7 @@
         $slots = buildMultiGroupSlots($pools, $rules, $totalSlot, $isRelax);
 
         $groupKeys = array_values(array_filter(array_keys($slots[0]), fn($k) => $k !== '__meta'));
-        return reorderNonConsecutive($slots, $groupKeys);
+        return reorderSpread($slots, $groupKeys);
     }
 
     /* ===================================================================
@@ -34,8 +34,10 @@
     function validateSlotCount(array $groups, int $min, int $max, int $totalSlot): void {
         foreach ($groups as $g => $brands) {
             $count = count($brands);
-            if ($totalSlot < $count * $min) throw new Exception("Group $g: total slot < minimum ({$count}×{$min})");
-            if ($totalSlot > $count * $max) throw new Exception("Group $g: total slot > maksimum ({$count}×{$max})");
+            if ($totalSlot < $count * $min)
+                throw new Exception("Group $g: total slot < minimum ({$count}×{$min})");
+            if ($totalSlot > $count * $max)
+                throw new Exception("Group $g: total slot > maksimum ({$count}×{$max})");
         }
     }
 
@@ -43,21 +45,44 @@
      * QUOTA & POOL
      * =================================================================== */
     function buildQuota(array $brands, int $min, int $max, int $totalSlot): array {
-        $quota   = [];
-        foreach ($brands as $b) $quota[$b['name_brand']] = $min;
-        $current = count($brands) * $min;
+        $priority = array_values(array_filter($brands, fn($b) => !empty($b['priority_brand'])));
+        $regular  = array_values(array_filter($brands, fn($b) =>  empty($b['priority_brand'])));
 
-        while ($current < $totalSlot) {
-            shuffle($brands);
-            foreach ($brands as $b) {
+        // Semua brand mulai dari min
+        $quota = [];
+        foreach ($brands as $b) $quota[$b['name_brand']] = $min;
+
+        $remaining = $totalSlot - count($brands) * $min;
+
+        // Pass 1 — priority brand dijamin +1 di atas min (bukan langsung max).
+        // Diacak agar tidak selalu brand yang sama yang dapat jika ekstra kurang.
+        shuffle($priority);
+        foreach ($priority as $b) {
+            if ($remaining <= 0) break;
+            $quota[$b['name_brand']]++;
+            $remaining--;
+        }
+
+        // Pass 2 — sisa ekstra: regular brand dapat giliran pertama,
+        // baru priority boleh naik lagi jika masih ada sisa.
+        // $extraOrder di-reshuffle tiap iterasi agar tidak ada brand
+        // yang selalu mendapat giliran terdepan ketika max-min > 1.
+        $prev = -1;
+        while ($remaining > 0 && $remaining !== $prev) {
+            $prev = $remaining;
+            shuffle($regular);
+            shuffle($priority);
+            $extraOrder = array_merge($regular, $priority); // regular dulu
+            foreach ($extraOrder as $b) {
+                if ($remaining <= 0) break;
                 $name = $b['name_brand'];
                 if ($quota[$name] < $max) {
                     $quota[$name]++;
-                    $current++;
-                    if ($current >= $totalSlot) break;
+                    $remaining--;
                 }
             }
         }
+
         return $quota;
     }
 
@@ -150,13 +175,14 @@
                         $slot      = [];
                         $collision = [];
                         foreach ($groups as $g) {
-                            $chosen = reset($workingPools[$g]);
+                            $chosen = !empty($workingPools[$g]) ? reset($workingPools[$g]) : null;
+                            if ($chosen === null) continue;
                             foreach ($slot as $existing) {
                                 if (!canMeet($chosen, $existing, $rules)) {
                                     $collision[] = ['group' => $g, 'brand' => $chosen, 'conflict' => $existing, 'slot' => $i + 1];
                                 }
                             }
-                            $slot[$g] = $chosen;
+                            if ($chosen !== null) $slot[$g] = $chosen;
                         }
                         $slot['__meta'] = ['relaxed' => true, 'collision' => $collision];
                     } else {
@@ -185,63 +211,104 @@
     }
 
     /* ===================================================================
-     * REORDER NON-KONSEKUTIF
-     * Susun ulang urutan slot agar tidak ada brand yang sama di dua
-     * slot berurutan pada group yang sama (greedy + random restart).
+     * REORDER SPREAD
+     *
+     * Susun ulang urutan slot agar setiap brand tersebar merata di
+     * seluruh posisi slot, bukan menumpuk di awal/tengah/akhir.
+     *
+     * Strategi: "most-stale first" greedy.
+     * Di setiap posisi p, pilih slot yang brand-brandnya paling lama
+     * tidak muncul (gap terbesar sejak penampilan terakhir). Brand yang
+     * belum pernah muncul mendapat bonus gap = n sehingga diprioritaskan
+     * di posisi awal.
+     *
+     * Contoh: brand kuota 3 di 16 slot → idealnya muncul di ~1, 6, 11
+     * bukan 1, 2, 3.
+     *
+     * Algoritma ini sekaligus menangani consecutive (gap ≥ 2 berarti
+     * tidak berturutan), sehingga menggantikan reorderNonConsecutive.
+     *
+     * $maxAttempts random restart digunakan untuk keluar dari local
+     * optimum — tiap restart mengacak urutan pool awal.
      * =================================================================== */
-    function reorderNonConsecutive(array $slots, array $groups, int $maxAttempts = 300): array {
+    function reorderSpread(array $slots, array $groups, int $maxAttempts = 50): array {
         $n = count($slots);
         if ($n <= 1) return $slots;
 
-        $bestSlots     = $slots;
-        $bestConflicts = countConsecutiveConflicts($slots, $groups);
-        if ($bestConflicts === 0) return $slots;
+        $bestSlots = $slots;
+        $bestScore = -1;
 
         for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
-            $remaining = $slots;
-            shuffle($remaining);
+            $pool    = $slots;
+            if ($attempt > 0) shuffle($pool);
+
             $arranged = [];
+            $lastPos  = []; // [g][brand] => indeks terakhir dalam $arranged
 
-            while (!empty($remaining)) {
-                $last   = !empty($arranged) ? end($arranged) : null;
-                $placed = false;
+            for ($pos = 0; $pos < $n; $pos++) {
+                $bestIdx   = 0;
+                $bestLocal = PHP_INT_MIN;
 
-                foreach ($remaining as $idx => $candidate) {
-                    if ($last === null || !hasConsecutiveConflict($last, $candidate, $groups)) {
-                        $arranged[] = $candidate;
-                        array_splice($remaining, $idx, 1);
-                        $placed = true;
-                        break;
+                foreach ($pool as $idx => $candidate) {
+                    $score = 0;
+                    foreach ($groups as $g) {
+                        $brand  = $candidate[$g] ?? null;
+                        if ($brand === null) continue;
+                        // gap sejak muncul terakhir; belum pernah muncul = bonus n
+                        $score += $pos - ($lastPos[$g][$brand] ?? -$n);
+                    }
+                    if ($score > $bestLocal) {
+                        $bestLocal = $score;
+                        $bestIdx   = $idx;
                     }
                 }
 
-                if (!$placed) $arranged[] = array_shift($remaining);
+                $picked     = $pool[$bestIdx];
+                $arranged[] = $picked;
+                array_splice($pool, $bestIdx, 1);
+
+                foreach ($groups as $g) {
+                    $brand = $picked[$g] ?? null;
+                    if ($brand !== null) $lastPos[$g][$brand] = $pos;
+                }
             }
 
-            $conflicts = countConsecutiveConflicts($arranged, $groups);
-            if ($conflicts < $bestConflicts) {
-                $bestConflicts = $conflicts;
-                $bestSlots     = $arranged;
+            $score = spreadScore($arranged, $groups, $n);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestSlots = $arranged;
             }
-            if ($bestConflicts === 0) break;
         }
 
         return $bestSlots;
     }
 
-    function hasConsecutiveConflict(array $prev, array $next, array $groups): bool {
-        foreach ($groups as $g) {
-            if (isset($prev[$g], $next[$g]) && $prev[$g] === $next[$g]) return true;
+    /* Skor kualitas sebaran: jumlah gap-minimum antar kemunculan
+     * brand yang sama. Semakin besar = semakin merata. */
+    function spreadScore(array $slots, array $groups, int $n): int {
+        $positions = [];
+        foreach ($slots as $i => $slot) {
+            foreach ($groups as $g) {
+                $brand = $slot[$g] ?? null;
+                if ($brand !== null) $positions[$g][$brand][] = $i;
+            }
         }
-        return false;
-    }
 
-    function countConsecutiveConflicts(array $slots, array $groups): int {
-        $count = 0;
-        $n     = count($slots);
-        for ($i = 1; $i < $n; $i++) {
-            if (hasConsecutiveConflict($slots[$i - 1], $slots[$i], $groups)) $count++;
+        $score = 0;
+        foreach ($positions as $brands) {
+            foreach ($brands as $indices) {
+                if (count($indices) < 2) {
+                    $score += $n; // brand muncul sekali → bonus penuh
+                    continue;
+                }
+                $minGap = PHP_INT_MAX;
+                for ($i = 1; $i < count($indices); $i++) {
+                    $minGap = min($minGap, $indices[$i] - $indices[$i - 1]);
+                }
+                $score += $minGap;
+            }
         }
-        return $count;
+
+        return $score;
     }
 ?>

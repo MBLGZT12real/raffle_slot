@@ -14,7 +14,7 @@
      */
     function getAllBrandsByGroup() {
         $rows = db_fetch_all("
-            SELECT name_brand, group_brand
+            SELECT name_brand, group_brand, priority_brand
             FROM table_brand
             ORDER BY group_brand ASC, name_brand ASC
         ");

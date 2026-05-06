@@ -40,7 +40,7 @@
             <?php endforeach ?>
         </ul>
 
-        <div class="tab-content mt-3">
+        <div class="tab-content mt-3 mb-5">
             <?php foreach ($dates as $i => $date): ?>
                 <?php 
                     $results    = getResultsByDate($date);

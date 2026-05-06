@@ -198,6 +198,7 @@ raffle_slot/
 |---|---|---|---|
 | `name_brand` | ✅ | Nama brand, maks 30 karakter | `Toyota` |
 | `group_brand` | ✅ | Satu huruf A–Z | `A` |
+| `priority_brand` | ❌ | `1`/`ya`/`yes` = brand prioritas, dijamin dapat `max_slot`. Kosong/`0` = distribusi acak (min–max). Boleh lebih dari 1 per group. | `1` |
 | `not_allow_brand` | ❌ | Brand yang tidak boleh satu slot, pisah koma | `Honda, Suzuki` |
 
 > Baris pertama adalah **header** (nama kolom). Data dimulai dari baris ke-2.

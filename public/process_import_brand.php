@@ -29,9 +29,10 @@ if ($step === 'confirm') {
     $conn->begin_transaction();
     try {
         db_query("TRUNCATE TABLE table_brand");
-        $stmt = $conn->prepare("INSERT INTO table_brand (name_brand, group_brand, not_allow_brand) VALUES (?,?,?)");
+        $stmt = $conn->prepare("INSERT INTO table_brand (name_brand, group_brand, not_allow_brand, priority_brand) VALUES (?,?,?,?)");
         foreach ($data as $r) {
-            $stmt->bind_param('sss', $r['name_brand'], $r['group_brand'], $r['not_allow_brand']);
+            $pri = (int)$r['priority_brand'];
+            $stmt->bind_param('sssi', $r['name_brand'], $r['group_brand'], $r['not_allow_brand'], $pri);
             $stmt->execute();
         }
         $stmt->close();
@@ -70,7 +71,8 @@ foreach ($required as $col) {
     if ($idx === false) die("Kolom '$col' tidak ditemukan");
     $map[$col] = $idx;
 }
-$notAllowIdx = array_search('not_allow_brand', $headerRow, true);
+$notAllowIdx  = array_search('not_allow_brand',  $headerRow, true);
+$priorityIdx  = array_search('priority_brand',   $headerRow, true);
 
 $data = [];
 for ($i = 2; $i <= count($rows); $i++) {
@@ -85,7 +87,13 @@ for ($i = 2; $i <= count($rows); $i++) {
         $na = trim((string)$row[$notAllowIdx]);
         if (!preg_match('/^[A-Za-z0-9\s\-\.,]+$/', $na)) die("not_allow_brand tidak valid di baris $i");
     }
-    $data[] = ['name_brand' => $name, 'group_brand' => $grp, 'not_allow_brand' => $na];
+    // priority_brand: 1 / "1" / "ya" / "yes" → 1, lainnya → 0
+    $pri = 0;
+    if ($priorityIdx !== false && !empty($row[$priorityIdx])) {
+        $raw = strtolower(trim((string)$row[$priorityIdx]));
+        $pri = in_array($raw, ['1', 'ya', 'yes', 'y', 'true'], true) ? 1 : 0;
+    }
+    $data[] = ['name_brand' => $name, 'group_brand' => $grp, 'not_allow_brand' => $na, 'priority_brand' => $pri];
 }
 
 $_SESSION['import_brand_preview'] = $data;

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS `table_brand` (
     `name_brand`      VARCHAR(100) NOT NULL,
     `group_brand`     VARCHAR(10)  NOT NULL,
     `not_allow_brand` TEXT         DEFAULT NULL,
+    `priority_brand`  TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '1 = prioritas (dijamin dapat max_slot), 0 = biasa',
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4

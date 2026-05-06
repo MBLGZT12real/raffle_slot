@@ -9,6 +9,8 @@
     require_once '../partials/auth_check_api.php';
     require_once '../core/DrawService.php';
     require_once '../core/SettingModel.php';
+    require_once '../core/BrandModel.php';
+    require_once '../core/LogModel.php';
 
     /**
      * PHP 7 SAFE helper
@@ -40,6 +42,30 @@
             throw new Exception("Setting tanggal tidak ditemukan");
         }
         $totalSlot = (int)$setting['total_slot'];
+        $min       = (int)$setting['min_slot'];
+        $max       = (int)$setting['max_slot'];
+
+        /* =========================
+        * 2.5 Cek priority terdegradasi
+        * Jika slot ekstra tidak cukup untuk semua brand prioritas dapat
+        * max_slot, catat di log (tanpa error/alert ke frontend).
+        * ========================= */
+        $allBrands = getAllBrandsByGroup();
+        foreach ($allBrands as $g => $brands) {
+            $priCount  = count(array_filter($brands, fn($b) => !empty($b['priority_brand'])));
+            if ($priCount === 0) continue;
+            $minNeeded = $priCount * $max + (count($brands) - $priCount) * $min;
+            if ($totalSlot < $minNeeded) {
+                $extra = $totalSlot - count($brands) * $min;
+                writeLog('priority_degraded', $date, [
+                    'group'          => $g,
+                    'priority_count' => $priCount,
+                    'total_slot'     => $totalSlot,
+                    'extra_slots'    => max(0, $extra),
+                    'note'           => "Hanya {$extra} slot ekstra tersedia, tidak cukup untuk semua {$priCount} brand prioritas group {$g} mendapat max ({$max})",
+                ]);
+            }
+        }
 
         /* =========================
         * 3️⃣ Generate slot FINAL
